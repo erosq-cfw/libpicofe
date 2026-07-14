@@ -12,10 +12,30 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <png.h>
 #include "plat.h"
 #include "readpng.h"
 #include "lprintf.h"
+
+#ifdef NO_PNG
+/* erosq: no libpng in sysroot. PNG assets (skin bg/font/selector) are optional;
+ * returning -1 makes callers fall back to the built-in font and a plain bg. */
+int readpng(void *dest, const char *fname, readpng_what what, int req_w, int req_h)
+{
+	(void)dest; (void)fname; (void)what; (void)req_w; (void)req_h;
+	return -1;
+}
+int writepngpp(const char *fname, unsigned short *src, int w, int h, int pitch)
+{
+	(void)fname; (void)src; (void)w; (void)h; (void)pitch;
+	return -1;
+}
+int writepng(const char *fname, unsigned short *src, int w, int h)
+{
+	(void)fname; (void)src; (void)w; (void)h;
+	return -1;
+}
+#else
+#include <png.h>
 
 int readpng(void *dest, const char *fname, readpng_what what, int req_w, int req_h)
 {
@@ -312,3 +332,4 @@ int writepng(const char *fname, unsigned short *src, int w, int h)
 {
 	return writepngpp(fname, src, w, h, w);
 }
+#endif /* NO_PNG */
