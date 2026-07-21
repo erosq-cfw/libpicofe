@@ -613,7 +613,7 @@ static void me_draw(const menu_entry *entries, int sel, void (*draw_more)(void))
 				name = ent->generate_name(ent->id, &offs);
 		}
 		if (name != NULL) {
-			text_out16(x, y, name);
+			text_out16(x, y, "%s", name);
 			leftname_end = x + (strlen(name) + 1) * me_mfont_w;
 		}
 
