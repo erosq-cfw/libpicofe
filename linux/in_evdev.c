@@ -39,6 +39,8 @@ typedef struct {
 	int abs_lzone;
 	int abs_lastx;
 	int abs_lasty;
+	int abs_lasthx; /* d-pad HAT last-emitted key (BT gamepad, own state so */
+	int abs_lasthy; /* it doesn't fight the analog stick's abs_lastx/y) */
 	int kc_first;
 	int kc_last;
 	unsigned int abs_count;
@@ -370,6 +372,24 @@ static int in_evdev_update(void *drv_data, const int *binds, int *result)
 		}
 	}
 
+	/* d-pad HAT (ABS_HAT0X/Y): digital -1/0/+1, no deadzone. The stick block
+	 * above only polls ABS_X/Y, so without this the BT gamepad d-pad drives
+	 * the menu (event path) but NOT in-game (this poll path). Gated on
+	 * abs_to_digital only (not lzone) so a hat-only pad still works; EVIOCGABS
+	 * returns -1 for absent axes, so this is a no-op on pads without a hat. */
+	if (dev->abs_to_digital) {
+		ret = ioctl(dev->fd, EVIOCGABS(ABS_HAT0X), &ainfo);
+		if (ret != -1) {
+			if (ainfo.value < 0)      or_binds(binds, KEY_LEFT, result);
+			else if (ainfo.value > 0) or_binds(binds, KEY_RIGHT, result);
+		}
+		ret = ioctl(dev->fd, EVIOCGABS(ABS_HAT0Y), &ainfo);
+		if (ret != -1) {
+			if (ainfo.value < 0)      or_binds(binds, KEY_UP, result);
+			else if (ainfo.value > 0) or_binds(binds, KEY_DOWN, result);
+		}
+	}
+
 	return 0;
 }
 
@@ -518,6 +538,20 @@ static int in_evdev_update_keycode(void *data, int *is_down)
 			else if (ev.value > dev->abs_max_y - lzone)
 				down = KEY_DOWN;
 			last = &dev->abs_lasty;
+		}
+		/* BT gamepad (8BitDo HoG) d-pad arrives as ABS_HAT0X/Y, value -1/0/+1.
+		 * Emit the same arrow keycodes the analog stick uses (already bound to
+		 * directions), so the d-pad rides the existing up/down state machine
+		 * below. No deadzone: the hat values are already digital. */
+		else if (ev.code == ABS_HAT0X) {
+			if (ev.value < 0)      down = KEY_LEFT;
+			else if (ev.value > 0) down = KEY_RIGHT;
+			last = &dev->abs_lasthx;
+		}
+		else if (ev.code == ABS_HAT0Y) {
+			if (ev.value < 0)      down = KEY_UP;
+			else if (ev.value > 0) down = KEY_DOWN;
+			last = &dev->abs_lasthy;
 		}
 		else
 			goto out;
