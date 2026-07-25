@@ -23,8 +23,10 @@
 #include <linux/input.h>
 #endif
 #include <errno.h>
+#include <dirent.h>
 
 #include "../input.h"
+#include "../plat.h"
 #include "in_evdev.h"
 
 #define MAX_ABS_DEVS 8
@@ -67,6 +69,86 @@ typedef struct {
 int in_evdev_allow_abs_only;
 
 #define IN_EVDEV_PREFIX "evdev:"
+
+/* --- hotplug --------------------------------------------------------------
+ * A Bluetooth pad's /dev/input node appears and vanishes with the connection,
+ * but probe() only ever ran once, from in_probe() at startup. Two things then
+ * conspire: an fd on a REMOVED evdev device is not closed by the kernel, it
+ * just fails every ioctl/read with ENODEV forever; and the reconnect creates a
+ * brand-new node (same path or not) that nobody opens. So one disconnect used
+ * to kill the pad for the rest of the process's life -- you had to restart the
+ * emulator, or find the menu's "Rescan devices" item.
+ *
+ * Fix: notice the change and let the frontend re-run in_probe(), which
+ * reattaches the pad's binds by device name. Two triggers, because each covers
+ * the other's blind spot:
+ *   - a probed fd going ENODEV catches the DISCONNECT (and refreshes the node
+ *     snapshot below, so a same-numbered reconnect still reads as a change),
+ *   - a change in the set of /dev/input/eventN nodes catches the CONNECT.
+ * This only reports; it must not re-probe by itself, because in_probe() frees
+ * the driver data that in_update()'s loop is walking. */
+#ifndef EVDEV_DIR
+#define EVDEV_DIR "/dev/input"
+#endif
+
+static unsigned int evdev_node_mask;  /* bit N set = EVDEV_DIR/eventN existed */
+static int evdev_dev_lost;            /* a probed fd started failing ENODEV */
+
+static unsigned int scan_node_mask(const char *dir)
+{
+	unsigned int mask = 0;
+	struct dirent *e;
+	DIR *d;
+
+	d = opendir(dir);
+	if (d == NULL)
+		return 0;
+
+	while ((e = readdir(d)) != NULL) {
+		unsigned long n;
+		char *end;
+
+		if (strncmp(e->d_name, "event", 5) != 0)
+			continue;
+		n = strtoul(e->d_name + 5, &end, 10);
+		if (*end == 0 && n < 8 * sizeof(mask))
+			mask |= 1u << n;
+	}
+	closedir(d);
+
+	return mask;
+}
+
+/* a removed device fails everything with ENODEV; note it and stay quiet about
+ * it, since the caller polls us every frame */
+static int dev_gone(void)
+{
+	if (errno != ENODEV)
+		return 0;
+	evdev_dev_lost = 1;
+	return 1;
+}
+
+/* 1 = the device set changed, caller should call in_probe() */
+int in_evdev_hotplug_check(void)
+{
+	static unsigned int last_scan_ms;
+	unsigned int now = plat_get_ticks_ms();
+
+	if (evdev_dev_lost)
+		return 1;
+
+	/* The scan is only a few syscalls, but this is called every frame.
+	 * Elapsed-since-last, unsigned: plat_get_ticks_ms() is derived from
+	 * gettimeofday(), so "now" is epoch-ms truncated to 32 bits and currently
+	 * has its top bit set -- a signed "deadline - now < 0" compare against a
+	 * zero-initialised deadline reads as "not due" and never fires. */
+	if ((unsigned int)(now - last_scan_ms) < 1000)
+		return 0;
+	last_scan_ms = now;
+
+	return scan_node_mask(EVDEV_DIR) != evdev_node_mask;
+}
 
 static const char * const in_evdev_keys[KEY_CNT] = {
 	// [0 ... KEY_MAX] = NULL, // not necessary
@@ -165,6 +247,10 @@ static void in_evdev_probe(const in_drv_t *drv)
 	// so make sure the buffers are clear.
 	memset(keybits, 0, sizeof(keybits));
 	memset(absbits, 0, sizeof(absbits));
+
+	/* baseline for in_evdev_hotplug_check() */
+	evdev_node_mask = scan_node_mask(EVDEV_DIR);
+	evdev_dev_lost = 0;
 
 	for (i = 0;; i++)
 	{
@@ -328,7 +414,8 @@ static int in_evdev_update(void *drv_data, const int *binds, int *result)
 	if (dev->kbits == NULL) {
 		ret = ioctl(dev->fd, EVIOCGKEY(sizeof(keybits_)), keybits_);
 		if (ret == -1) {
-			perror("in_evdev: ioctl failed");
+			if (!dev_gone())
+				perror("in_evdev: ioctl failed");
 			return -1;
 		}
 	}
@@ -337,7 +424,7 @@ static int in_evdev_update(void *drv_data, const int *binds, int *result)
 		while (1) {
 			rd = read(dev->fd, ev, sizeof(ev));
 			if (rd < (int)sizeof(ev[0])) {
-				if (errno != EAGAIN)
+				if (errno != EAGAIN && !dev_gone())
 					perror("in_evdev: read failed");
 				break;
 			}
@@ -506,7 +593,8 @@ static int in_evdev_update_keycode(void *data, int *is_down)
 	rd = read(dev->fd, &ev, sizeof(ev));
 	if (rd < (int) sizeof(ev)) {
 		if (errno != EAGAIN) {
-			perror("in_evdev: error reading");
+			if (!dev_gone())
+				perror("in_evdev: error reading");
 			//sleep(1);
 			ret_kc = -2;
 		}
