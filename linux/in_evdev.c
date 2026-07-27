@@ -49,6 +49,12 @@ typedef struct {
 	int abs_mult[MAX_ABS_DEVS]; /* 16.16 multiplier to IN_ABS_RANGE */
 	int abs_adj[MAX_ABS_DEVS];  /* adjust for centering */
 	unsigned int abs_to_digital:1;
+	/* Whether the analog STICK (ABS_X/Y) is also reported as arrow keys.
+	 * Split out from abs_to_digital because the d-pad of a HoG gamepad
+	 * arrives as ABS_HAT0X/Y and rides the same conversion: switching the
+	 * stick off must not take the d-pad with it. Controlled by
+	 * IN_CFG_ANALOG_MAP_ULDR, whose name means exactly this. */
+	unsigned int abs_stick_to_digital:1;
 
 	const in_drv_t *drv;
 } in_evdev_t;
@@ -371,6 +377,7 @@ no_abs:
 		dev->kc_last = kc_last;
 		if (count > 0 || in_evdev_allow_abs_only)
 			dev->abs_to_digital = 1;
+		dev->abs_stick_to_digital = 1;
 		strcpy(name, IN_EVDEV_PREFIX);
 		ioctl(fd, EVIOCGNAME(sizeof(name)-6), name+6);
 		printf("in_evdev: found \"%s\" with %d events (type %08x)\n",
@@ -456,7 +463,7 @@ static int in_evdev_update(void *drv_data, const int *binds, int *result)
 
 	/* map X and Y absolute to UDLR */
 	lzone = dev->abs_lzone;
-	if (dev->abs_to_digital && lzone != 0) {
+	if (dev->abs_to_digital && dev->abs_stick_to_digital && lzone != 0) {
 		ret = ioctl(dev->fd, EVIOCGABS(ABS_X), &ainfo);
 		if (ret != -1) {
 			if (ainfo.value < dev->abs_min_x + lzone) or_binds(binds, KEY_LEFT, result);
@@ -555,7 +562,8 @@ static int in_evdev_get_config(void *drv_data, enum in_cfg_opt what, int *val)
 		*val = dev->abs_count;
 		break;
 	case IN_CFG_ANALOG_MAP_ULDR:
-		*val = dev->abs_to_digital;
+		*val = dev->abs_stick_to_digital;
+		break;
 	default:
 		return -1;
 	}
@@ -583,7 +591,8 @@ static int in_evdev_set_config(void *drv_data, enum in_cfg_opt what, int val)
 			dev->abs_lzone = tmp - 1;
 		break;
 	case IN_CFG_ANALOG_MAP_ULDR:
-		dev->abs_to_digital = val;
+		dev->abs_stick_to_digital = val;
+		break;
 	default:
 		return -1;
 	}
@@ -623,14 +632,14 @@ static int in_evdev_update_keycode(void *data, int *is_down)
 		int lzone = dev->abs_lzone, down = 0, *last;
 
 		// map absolute to up/down/left/right
-		if (lzone != 0 && ev.code == ABS_X) {
+		if (lzone != 0 && dev->abs_stick_to_digital && ev.code == ABS_X) {
 			if (ev.value < dev->abs_min_x + lzone)
 				down = KEY_LEFT;
 			else if (ev.value > dev->abs_max_x - lzone)
 				down = KEY_RIGHT;
 			last = &dev->abs_lastx;
 		}
-		else if (lzone != 0 && ev.code == ABS_Y) {
+		else if (lzone != 0 && dev->abs_stick_to_digital && ev.code == ABS_Y) {
 			if (ev.value < dev->abs_min_y + lzone)
 				down = KEY_UP;
 			else if (ev.value > dev->abs_max_y - lzone)
