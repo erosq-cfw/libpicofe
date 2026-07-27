@@ -113,6 +113,8 @@ static void in_free(in_dev_t *dev)
 	dev->name = NULL;
 	free(dev->binds);
 	dev->binds = NULL;
+	free(dev->kbd_binds);
+	dev->kbd_binds = NULL;
 }
 
 /* to be called by drivers
@@ -285,13 +287,21 @@ void in_probe(void)
 	/* get rid of devs without binds and probes */
 	for (i = 0; i < in_dev_count; i++) {
 		if (!in_devices[i].probed && in_devices[i].binds == NULL) {
+			in_free(&in_devices[i]);
 			in_dev_count--;
-			if (i < in_dev_count) {
-				free(in_devices[i].name);
+			if (i < in_dev_count)
 				memmove(&in_devices[i], &in_devices[i+1],
 					(in_dev_count - i) * sizeof(in_devices[0]));
-			}
-
+			/* The memmove leaves a byte-copy of a live device behind in
+			 * the slot it vacated -- same drv_data, still flagged probed,
+			 * and still reachable, because get_dev() bounds-checks against
+			 * IN_MAX_DEVS rather than in_dev_count. The next in_probe()
+			 * frees that drv_data through the live copy and the stale one
+			 * is left dangling, so clear the slot. Then re-examine this
+			 * index: it now holds the entry that was moved down into it,
+			 * which may need removing too. */
+			memset(&in_devices[in_dev_count], 0, sizeof(in_devices[0]));
+			i--;
 			continue;
 		}
 

@@ -91,6 +91,11 @@ int in_evdev_allow_abs_only;
 #define EVDEV_DIR "/dev/input"
 #endif
 
+/* How far in_evdev_probe() enumerates. Tied to the width of the node mask
+ * below: a device past this is invisible to the connect trigger, so probing
+ * for one would only find something we could never re-probe on hotplug. */
+#define EVDEV_MAX_NODES (8 * sizeof(evdev_node_mask))
+
 static unsigned int evdev_node_mask;  /* bit N set = EVDEV_DIR/eventN existed */
 static int evdev_dev_lost;            /* a probed fd started failing ENODEV */
 
@@ -109,6 +114,11 @@ static unsigned int scan_node_mask(const char *dir)
 		char *end;
 
 		if (strncmp(e->d_name, "event", 5) != 0)
+			continue;
+		/* strtoul() would take "" as 0 (leaving *end at the terminator) and
+		 * would also eat a sign, so "event" and "event+3" have to be
+		 * rejected here rather than by the *end check below */
+		if (e->d_name[5] < '0' || e->d_name[5] > '9')
 			continue;
 		n = strtoul(e->d_name + 5, &end, 10);
 		if (*end == 0 && n < 8 * sizeof(mask))
@@ -252,20 +262,20 @@ static void in_evdev_probe(const in_drv_t *drv)
 	evdev_node_mask = scan_node_mask(EVDEV_DIR);
 	evdev_dev_lost = 0;
 
-	for (i = 0;; i++)
+	for (i = 0; i < EVDEV_MAX_NODES; i++)
 	{
 		int support = 0, count = 0;
 		int u, ret, fd, kc_first = KEY_MAX, kc_last = 0, have_abs = 0;
 		in_evdev_t *dev;
 		char name[64];
 
-		snprintf(name, sizeof(name), "/dev/input/event%d", i);
+		snprintf(name, sizeof(name), "%s/event%d", EVDEV_DIR, i);
 		fd = open(name, O_RDONLY|O_NONBLOCK);
-		if (fd == -1) {
-			if (errno == EACCES)
-				continue;	/* maybe we can access next one */
-			break;
-		}
+		if (fd == -1)
+			continue;	/* no permission, or a hole: a disconnected
+					 * device leaves one, and stopping here would
+					 * drop every node above it for as long as
+					 * it stays disconnected */
 
 		/* check supported events */
 		ret = ioctl(fd, EVIOCGBIT(0, sizeof(support)), &support);
